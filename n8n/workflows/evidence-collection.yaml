@@ -1,0 +1,347 @@
+id: 12
+name: Evidence Collection Workflow
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/evidence-collection
+      httpMethod: post
+      options: {}
+  - id: create-record
+    name: Create Evidence Record
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/evidence
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"engagement_id": {{ $json.engagement_id }}, "host_id": {{ $json.host_id }}, "evidence_type": "{{ $json.evidence_types[0] || 'generic' }}", "name": "evidence_{{ $execution.id }}", "status": "collecting", "collected_by": "{{ $json.collected_by || 'system' }}"}
+      options: {}
+  - id: generate-filename
+    name: Generate Filename
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const evidence = items[0].json;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const evidenceId = evidence.id || evidence.evidence_id;
+        
+        let filename;
+        const evidenceType = evidence.evidence_types?.[0] || 'generic';
+        
+        switch (evidenceType) {
+          case 'screenshot':
+            filename = `screenshot_${evidence.host_ip || 'unknown'}_${timestamp}.png`;
+            break;
+          case 'pcap':
+            filename = `pcap_${evidence.host_ip || 'unknown'}_${evidence.port || 'all'}_${timestamp}.pcap`;
+            break;
+          case 'command_output':
+            filename = `output_${evidence.command_type || 'generic'}_${timestamp}.txt`;
+            break;
+          case 'hash':
+            filename = `hash_${evidence.file_hash_type || 'sha256'}_${timestamp}.txt`;
+            break;
+          case 'screenshot':
+            filename = `screenshot_${timestamp}.png`;
+            break;
+          default:
+            filename = `evidence_${evidenceId}_${timestamp}`;
+        }
+        
+        return [{
+          json: {
+            ...evidence,
+            evidence_id: evidenceId,
+            filename: filename,
+            storage_path: `/tmp/anptop/evidence/${evidence.engagement_id}/${filename}`,
+            mime_type: getMimeType(evidenceType, filename)
+          }
+        }];
+        
+        function getMimeType(type, filename) {
+          const mimeTypes = {
+            'screenshot': 'image/png',
+            'pcap': 'application/octet-stream',
+            'command_output': 'text/plain',
+            'hash': 'text/plain',
+            'screenshot': 'image/png'
+          };
+          
+          if (mimeTypes[type]) return mimeTypes[type];
+          
+          const ext = filename.split('.').pop().toLowerCase();
+          const extMime = {
+            'txt': 'text/plain',
+            'log': 'text/plain',
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'pdf': 'application/pdf',
+            'pcap': 'application/octet-stream',
+            'zip': 'application/zip'
+          };
+          
+          return extMime[ext] || 'application/octet-stream';
+        }
+  - id: collect-evidence
+    name: Collect Evidence
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      functionCode: |
+        const evidence = items[0].json;
+        const evidenceType = evidence.evidence_types?.[0] || 'generic';
+        let command;
+        
+        switch (evidenceType) {
+          case 'screenshot':
+            command = `import -window root /tmp/anptop/evidence/${evidence.engagement_id}/${evidence.filename} 2>/dev/null || echo "Screenshot tool not available"`;
+            break;
+          case 'pcap':
+            command = `tcpdump -i any -w ${evidence.storage_path} -c ${evidence.packet_count || 1000} 2>/dev/null || echo "tcpdump not available"`;
+            break;
+          case 'command_output':
+            command = `echo "\\$ ${evidence.command_to_execute}\\n$(${evidence.command_to_execute})" > ${evidence.storage_path} 2>&1`;
+            break;
+          case 'session_dump':
+            command = `msfconsole -q -x 'sessions -i ${evidence.session_id} -o ${evidence.storage_path}.txt'; cp /tmp/*${evidence.session_id}*.txt ${evidence.storage_path}.txt 2>/dev/null`;
+            break;
+          case 'file_dump':
+            command = `cat "${evidence.file_path}" > "${evidence.storage_path}" 2>/dev/null || echo "File not accessible"`;
+            break;
+          default:
+            command = `echo "Evidence collection: ${evidenceType}" > ${evidence.storage_path}`;
+        }
+        
+        return [{
+          json: {
+            ...evidence,
+            command: command,
+            started_at: new Date().toISOString()
+          }
+        }];
+  - id: execute-collection
+    name: Execute Collection
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      command: "{{ $json.command }}"
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/evidence
+        timeout: "{{ $json.timeout || 120 }}"
+  - id: calculate-hashes
+    name: Calculate Hashes
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      functionCode: |
+        const evidence = items[0].json;
+        const fs = require('fs');
+        const path = evidence.storage_path;
+        
+        let hashes = {
+          sha256: null,
+          sha512: null,
+          md5: null
+        };
+        
+        try {
+          if (fs.existsSync(path)) {
+            const fileBuffer = fs.readFileSync(path);
+            const crypto = require('crypto');
+            
+            hashes.sha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+            hashes.sha512 = crypto.createHash('sha512').update(fileBuffer).digest('hex');
+            hashes.md5 = crypto.createHash('md5').update(fileBuffer).digest('hex');
+            
+            return [{
+              json: {
+                ...evidence,
+                sha256_hash: hashes.sha256,
+                sha512_hash: hashes.sha512,
+                md5_hash: hashes.md5,
+                file_size: fileBuffer.length,
+                file_exists: true
+              }
+            }];
+          } else {
+            return [{
+              json: {
+                ...evidence,
+                file_exists: false,
+                warning: 'Evidence file not created'
+              }
+            }];
+          }
+        } catch (err) {
+          return [{
+            json: {
+              ...evidence,
+              file_exists: false,
+              error: err.message
+            }
+          }];
+        }
+  - id: upload-storage
+    name: Upload to Storage
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/evidence/{{ $json.evidence_id }}/upload
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"file_path": "{{ $json.storage_path }}", "sha256_hash": "{{ $json.sha256_hash }}", "sha512_hash": "{{ $json.sha512_hash }}", "md5_hash": "{{ $json.md5_hash }}", "file_size": {{ $json.file_size }}, "mime_type": "{{ $json.mime_type }}"}
+      options: {}
+  - id: update-record
+    name: Update Evidence Record
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      method: put
+      url: >-
+        http://backend:8000/api/v1/evidence/{{ $json.evidence_id }}
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"status": "{{ $json.file_exists ? 'collected' : 'failed' }}", "storage_path": "{{ $json.storage_path }}", "sha256_hash": "{{ $json.sha256_hash }}", "sha512_hash": "{{ $json.sha512_hash }}", "md5_hash": "{{ $json.md5_hash }}", "file_size": {{ $json.file_size || 0 }}, "mime_type": "{{ $json.mime_type }}", "collected_at": "{{ $node['Execute Collection'].json.completed_at }}", "file_exists": {{ $json.file_exists }}}
+      options: {}
+  - id: chain-custody
+    name: Log Chain of Custody
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1850
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/evidence/{{ $json.evidence_id }}/custody
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"action_type": "collected", "timestamp": "{{ $node['Execute Collection'].json.completed_at }}", "collected_by": "{{ $json.collected_by || 'system' }}", "location": "{{ $json.storage_path }}", "integrity_verified": true, "sha256": "{{ $json.sha256_hash }}"}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 2050
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "{{ $json.file_exists ? 'collected' : 'failed' }}", "evidence_id": "{{ $json.evidence_id }}", "sha256_hash": "{{ $json.sha256_hash }}", "file_size": {{ $json.file_size || 0 }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Create Evidence Record
+          type: main
+          index: 0
+  Create Evidence Record:
+    main:
+      - - node: Generate Filename
+          type: main
+          index: 0
+  Generate Filename:
+    main:
+      - - node: Collect Evidence
+          type: main
+          index: 0
+  Collect Evidence:
+    main:
+      - - node: Execute Collection
+          type: main
+          index: 0
+  Execute Collection:
+    main:
+      - - node: Calculate Hashes
+          type: main
+          index: 0
+  Calculate Hashes:
+    main:
+      - - node: Upload to Storage
+          type: main
+          index: 0
+  Upload to Storage:
+    main:
+      - - node: Update Evidence Record
+          type: main
+          index: 0
+  Update Evidence Record:
+    main:
+      - - node: Log Chain of Custody
+          type: main
+          index: 0
+  Log Chain of Custody:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

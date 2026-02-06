@@ -1,0 +1,542 @@
+id: 13
+name: Reporting Trigger Workflow
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/report-generation
+      httpMethod: post
+      options: {}
+  - id: get-engagement
+    name: Get Engagement Data
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: get-vulnerabilities
+    name: Get Vulnerability Data
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 650
+      - 200
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/vulnerabilities
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: get-hosts
+    name: Get Host Data
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 650
+      - 400
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/hosts
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: get-evidence
+    name: Get Evidence
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 650
+      - 600
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/evidence
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: get-exploits
+    name: Get Exploit Data
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 650
+      - 800
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/exploits
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: calculate-metrics
+    name: Calculate Metrics
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      functionCode: |
+        const engagement = items[0].json.engagement;
+        const vulnerabilities = items[0].json.vulnerabilities || [];
+        const hosts = items[0].json.hosts || [];
+        const evidence = items[0].json.evidence || [];
+        const exploits = items[0].json.exploits || [];
+        
+        // Calculate metrics
+        const metrics = {
+          total_vulnerabilities: vulnerabilities.length,
+          critical_count: vulnerabilities.filter(v => v.risk_rating === 'critical' || v.cvss_score >= 9.0).length,
+          high_count: vulnerabilities.filter(v => v.risk_rating === 'high' || (v.cvss_score >= 7.0 && v.cvss_score < 9.0)).length,
+          medium_count: vulnerabilities.filter(v => v.risk_rating === 'medium' || (v.cvss_score >= 4.0 && v.cvss_score < 7.0)).length,
+          low_count: vulnerabilities.filter(v => v.risk_rating === 'low' || v.cvss_score < 4.0).length,
+          informational_count: vulnerabilities.filter(v => v.risk_rating === 'informational').length,
+          
+          hosts_scanned: hosts.length,
+          hosts_with_vulnerabilities: hosts.filter(h => h.vulnerability_count > 0).length,
+          hosts_scanned_count: hosts.filter(h => h.status === 'scanned').length,
+          alive_hosts: hosts.filter(h => h.status === 'alive').length,
+          
+          evidence_collected: evidence.length,
+          exploits_successful: exploits.filter(e => e.status === 'completed' && e.success).length,
+          exploits_failed: exploits.filter(e => e.status === 'completed' && !e.success).length,
+          
+          // Calculate average CVSS
+          avg_cvss: vulnerabilities.length > 0 
+            ? (vulnerabilities.reduce((sum, v) => sum + (v.cvss_score || 0), 0) / vulnerabilities.length).toFixed(2)
+            : 0,
+            
+          // Risk score calculation
+          risk_score: Math.min(100, (vulnerabilities.filter(v => v.cvss_score >= 9.0).length * 25) +
+                                         (vulnerabilities.filter(v => v.cvss_score >= 7.0).length * 15) +
+                                         (vulnerabilities.filter(v => v.cvss_score >= 4.0).length * 5))
+        };
+        
+        return [{
+          json: {
+            engagement,
+            vulnerabilities,
+            hosts,
+            evidence,
+            exploits,
+            metrics,
+            report_type: items[0].json.report_type || 'both'
+          }
+        }];
+  - id: generate-executive
+    name: Generate Executive Summary
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1050
+      - 200
+    parameters:
+      functionCode: |
+        const data = items[0].json;
+        const engagement = data.engagement;
+        const metrics = data.metrics;
+        
+        const summary = `# Executive Summary - Penetration Test Report
+
+## Engagement Overview
+- **Client**: ${engagement.client_name || 'Confidential'}
+- **Engagement Name**: ${engagement.name}
+- **Scope**: ${engagement.scope_type || 'Network'}
+- **Dates**: ${engagement.start_date || 'N/A'} to ${engagement.end_date || 'Present'}
+- **Methodology**: ${engagement.methodology || 'Black Box'}
+
+## Key Findings Summary
+| Severity | Count |
+|----------|-------|
+| Critical | ${metrics.critical_count} |
+| High | ${metrics.high_count} |
+| Medium | ${metrics.medium_count} |
+| Low | ${metrics.low_count} |
+| Informational | ${metrics.informational_count} |
+| **Total** | **${metrics.total_vulnerabilities}** |
+
+## Risk Assessment
+- **Overall Risk Score**: ${metrics.risk_score}/100
+- **Average CVSS**: ${metrics.avg_cvss}
+- **Hosts Scanned**: ${metrics.hosts_scanned_count}/${metrics.hosts_scanned}
+- **Hosts with Findings**: ${metrics.hosts_with_vulnerabilities}
+
+## Critical Findings
+${metrics.critical_count > 0 
+  ? data.vulnerabilities.filter(v => v.risk_rating === 'critical' || v.cvss_score >= 9.0).slice(0, 5).map(v => 
+      `- **${v.cve_id || v.title}** (CVSS: ${v.cvss_score || 'N/A'})\n  Host: ${v.host_ip}\n  Description: ${v.description?.substring(0, 200)}...`
+    ).join('\n\n')
+  : 'No critical vulnerabilities identified.'}
+
+## Recommendations Summary
+1. Immediate remediation of critical and high-severity findings
+2. Implement defense-in-depth controls
+3. Regular vulnerability scanning and patch management
+4. Security awareness training for staff
+5. Incident response plan testing
+
+## Evidence of Testing
+- **Evidence Files Collected**: ${metrics.evidence_collected}
+- **Successful Exploits**: ${metrics.exploits_successful}
+- **Tested Hosts**: ${metrics.alive_hosts}
+
+---
+*Report generated: ${new Date().toISOString()}*
+`;
+        
+        return [{
+          json: {
+            ...data,
+            executive_summary: summary,
+            metrics
+          }
+        }];
+  - id: generate-technical
+    name: Generate Technical Report
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1050
+      - 400
+    parameters:
+      functionCode: |
+        const data = items[0].json;
+        const engagement = data.engagement;
+        const vulnerabilities = data.vulnerabilities;
+        const hosts = data.hosts;
+        const evidence = data.evidence;
+        
+        // Generate detailed findings
+        const findings = vulnerabilities.map((v, idx) => `
+## Finding #${idx + 1}: ${v.title || v.cve_id || 'Unknown Vulnerability}
+
+### Severity
+**${v.risk_rating?.toUpperCase() || 'UNKNOWN'}** (CVSS: ${v.cvss_score || 'N/A'})
+
+### Affected System
+- **Host**: ${v.host_ip || 'N/A'}
+- **Port**: ${v.port || 'N/A'}
+- **Service**: ${v.service_name || 'N/A'}
+
+### Description
+${v.description || 'No description available.'}
+
+### Technical Details
+- **CVE ID**: ${v.cve_id || 'N/A'}
+- **CVSS Vector**: ${v.cvss_vector || 'N/A'}
+- **Category**: ${v.category || 'Unknown'}
+- **Exploit Available**: ${v.exploit_available ? 'Yes' : 'No'}
+
+### Evidence
+${evidence.filter(e => e.vulnerability_id === v.id).map(e => 
+  `- [${e.name}](${e.storage_path})`
+).join('\n') || 'No evidence files attached.'}
+
+### Remediation
+${v.remediation || 'Contact vendor for patch/remediation guidance.'}
+
+---
+`).join('\n');
+        
+        const technical = `# Technical Penetration Test Report
+
+## Table of Contents
+1. [Scope and Methodology](#scope-and-methodology)
+2. [Network Infrastructure](#network-infrastructure)
+3. [Vulnerability Findings](#vulnerability-findings)
+4. [Exploitation Results](#exploitation-results)
+5. [Evidence Appendix](#evidence-appendix)
+6. [Recommendations](#recommendations)
+
+## 1. Scope and Methodology
+### Scope
+- **Engagement Type**: ${engagement.methodology || 'Black Box'}
+- **Target Type**: ${engagement.scope_type || 'Network'}
+- **Total Targets**: ${hosts.length}
+- **Scanned Hosts**: ${hosts.filter(h => h.status === 'scanned').length}
+
+### Methodology
+1. Reconnaissance and Discovery
+2. Service Enumeration
+3. Vulnerability Assessment
+4. Exploitation (with authorization)
+5. Post-Exploitation
+6. Reporting
+
+## 2. Network Infrastructure
+${hosts.map(h => `
+### Host: ${h.ip}
+- **Hostname**: ${h.hostname || 'Unknown'}
+- **OS**: ${h.os || 'Unknown'}
+- **Status**: ${h.status}
+- **Open Ports**: ${h.port_count || 0}
+`).join('\n')}
+
+## 3. Vulnerability Findings
+${findings}
+
+## 4. Exploitation Results
+${data.exploits && data.exploits.length > 0 
+  ? data.exploits.map(e => `
+### ${e.cve_id || e.title}
+- **Target**: ${e.target_ip}
+- **Result**: ${e.success ? 'SUCCESS' : 'FAILED'}
+- **Session Created**: ${e.session_id || 'No'}
+- **Technique**: ${e.technique || 'N/A'}
+`).join('\n')
+  : 'No exploitation attempts recorded.'}
+
+## 5. Evidence Appendix
+${evidence.map(e => `
+- **File**: ${e.name}
+- **Type**: ${e.evidence_type}
+- **Collected**: ${e.collected_at}
+- **Hash (SHA256)**: ${e.sha256_hash || 'N/A'}
+`).join('\n')}
+
+## 6. Recommendations
+${data.vulnerabilities.filter(v => v.risk_rating === 'critical' || v.risk_rating === 'high').map(v => 
+  `- **Priority ${v.risk_rating === 'critical' ? 'P1' : 'P2'}**: Remediate ${v.title || v.cve_id}`
+).join('\n')}
+
+---
+*Report generated: ${new Date().toISOString()}*
+`;
+        
+        return [{
+          json: {
+            ...data,
+            technical_report: technical
+          }
+        }];
+  - id: merge-reports
+    name: Merge Reports
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      functionCode: |
+        const data = items[0].json;
+        const reportType = data.report_type || 'both';
+        
+        let content;
+        if (reportType === 'executive') {
+          content = data.executive_summary;
+        } else if (reportType === 'technical') {
+          content = data.technical_report;
+        } else {
+          content = data.executive_summary + '\n\n' + data.technical_report;
+        }
+        
+        return [{
+          json: {
+            ...data,
+            report_content: content,
+            report_format: reportType,
+            generated_at: new Date().toISOString()
+          }
+        }];
+  - id: generate-html
+    name: Generate HTML
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      command: >-
+        echo "{{ $json.report_content }}" | pandoc -s -r markdown -w html -o /tmp/anptop/reports/{{ $json.engagement_id }}_{{ $json.report_format }}.html
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/reports
+        timeout: 60
+  - id: generate-pdf
+    name: Generate PDF
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      command: >-
+        wkhtmltopdf /tmp/anptop/reports/{{ $json.engagement_id }}_{{ $json.report_format }}.html /tmp/anptop/reports/{{ $json.engagement_id }}_{{ $json.report_format }}.pdf 2>/dev/null || echo "PDF generation requires wkhtmltopdf"
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/reports
+        timeout: 120
+  - id: create-report-record
+    name: Create Report Record
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1850
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/reports
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"engagement_id": {{ $json.engagement_id }}, "report_type": "{{ $json.report_format }}", "title": "{{ $json.report_format | capitalize }} Report - {{ $json.engagement.name }}", "html_path": "/tmp/anptop/reports/{{ $json.engagement_id }}_{{ $json.report_format }}.html", "pdf_path": "/tmp/anptop/reports/{{ $json.engagement_id }}_{{ $json.report_format }}.pdf", "content": "{{ $json.report_content | truncate(10000) }}", "status": "completed", "metrics": {{ $json.metrics }}, "generated_by": "{{ $json.generated_by || 'system' }}"}
+      options: {}
+  - id: notify-completion
+    name: Notify Completion
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 2050
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/notifications
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"type": "report_ready", "priority": "medium", "message": "{{ $json.report_format | capitalize }} report ready for engagement {{ $json.engagement_id }}", "engagement_id": {{ $json.engagement_id }}, "report_id": {{ $json.report_id }}, "vulnerabilities_found": {{ $json.metrics.total_vulnerabilities }}}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 2250
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "report_id": {{ $json.report_id }}, "report_type": "{{ $json.report_format }}", "vulnerabilities": {{ $json.metrics.total_vulnerabilities }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Get Engagement Data
+          type: main
+          index: 0
+  Get Engagement Data:
+    main:
+      - - node: Get Vulnerability Data
+          type: main
+          index: 0
+      - - node: Get Host Data
+          type: main
+          index: 0
+      - - node: Get Evidence
+          type: main
+          index: 0
+      - - node: Get Exploit Data
+          type: main
+          index: 0
+  Get Vulnerability Data:
+    main:
+      - - node: Calculate Metrics
+          type: main
+          index: 0
+  Get Host Data:
+    main:
+      - - node: Calculate Metrics
+          type: main
+          index: 0
+  Get Evidence:
+    main:
+      - - node: Calculate Metrics
+          type: main
+          index: 0
+  Get Exploit Data:
+    main:
+      - - node: Calculate Metrics
+          type: main
+          index: 0
+  Calculate Metrics:
+    main:
+      - - node: Generate Executive Summary
+          type: main
+          index: 0
+      - - node: Generate Technical Report
+          type: main
+          index: 0
+  Generate Executive Summary:
+    main:
+      - - node: Merge Reports
+          type: main
+          index: 0
+  Generate Technical Report:
+    main:
+      - - node: Merge Reports
+          type: main
+          index: 0
+  Merge Reports:
+    main:
+      - - node: Generate HTML
+          type: main
+          index: 0
+  Generate HTML:
+    main:
+      - - node: Generate PDF
+          type: main
+          index: 0
+  Generate PDF:
+    main:
+      - - node: Create Report Record
+          type: main
+          index: 0
+  Create Report Record:
+    main:
+      - - node: Notify Completion
+          type: main
+          index: 0
+  Notify Completion:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

@@ -1,0 +1,284 @@
+id: 4
+name: Service & Version Detection
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/service-detection
+      httpMethod: post
+      options: {}
+  - id: get-open-ports
+    name: Get Open Ports
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/ports?status=open
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: group-ports
+    name: Group Ports by Host
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const ports = items[0].json.ports || [];
+        const hostPorts = {};
+        
+        for (const port of ports) {
+          const hostId = port.host_id;
+          if (!hostPorts[hostId]) {
+            hostPorts[hostId] = {
+              host_id: hostId,
+              ip: port.ip,
+              hostname: port.hostname || '',
+              ports: []
+            };
+          }
+          hostPorts[hostId].ports.push({
+            port: port.port,
+            protocol: port.protocol || 'tcp'
+          });
+        }
+        
+        return Object.values(hostPorts).map(h => ({ json: h }));
+  - id: select-nse-scripts
+    name: Select NSE Scripts
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      functionCode: |
+        const host = items[0].json;
+        const ports = host.ports.map(p => p.port);
+        
+        // NSE script mapping based on port numbers
+        const scriptMapping = {
+          21: ['ftp-anon', 'ftp-bounce', 'ftp-proftpd-backdoor'],
+          22: ['ssh-auth-methods', 'ssh2-enum-algos', 'ssh-hostkey'],
+          23: ['telnet-encryption', 'telnet-ntlm-info'],
+          25: ['smtp-commands', 'smtp-enum-users', 'smtp-ntlm-info'],
+          53: ['dns-brute', 'dns-cache-snoop', 'dns-nsec3'],
+          80: ['http-headers', 'http-methods', 'http-title', 'http-robots.txt'],
+          110: ['pop3-capabilities', 'pop3-ntlm-info'],
+          111: ['rpcinfo', 'rpc-grind'],
+          135: ['msrpc-enum'],
+          139: ['smb-enum-shares', 'smb-enum-users', 'smb-os-discovery'],
+          443: ['ssl-cert', 'ssl-date', 'tls-heartbleed', 'http-headers'],
+          445: ['smb-enum-shares', 'smb-enum-users', 'smb-os-discovery', 'smb-vuln-ms17-010'],
+          993: ['imap-capabilities', 'imap-ntlm-info'],
+          995: ['pop3-capabilities', 'pop3-ntlm-info'],
+          1433: ['ms-sql-info', 'ms-sql-empty-password', 'ms-sql-brute'],
+          1521: ['oracle-tns-version', 'oracle-enum-users'],
+          3306: ['mysql-info', 'mysql-enum', 'mysql-empty-password'],
+          3389: ['rdp-enum-encryption', 'rdp-ntlm-info'],
+          5432: ['pgsql-info', 'postgres-enum-users'],
+          5900: ['vnc-info', 'realvnc-auth-bypass'],
+          8080: ['http-headers', 'http-methods', 'http-title', 'http-proxy']
+        };
+        
+        const selectedScripts = new Set();
+        const scriptArguments = {};
+        
+        for (const port of ports) {
+          const portInt = parseInt(port);
+          if (scriptMapping[portInt]) {
+            for (const script of scriptMapping[portInt]) {
+              selectedScripts.add(script);
+              scriptArguments[script] = {
+                port: portInt,
+                timeout: '30s'
+              };
+            }
+          }
+        }
+        
+        // Add version detection
+        selectedScripts.add('version');
+        
+        return [{
+          json: {
+            host_id: host.host_id,
+            ip: host.ip,
+            hostname: host.hostname,
+            ports: host.ports,
+            scripts: Array.from(selectedScripts),
+            arguments: scriptArguments,
+            scan_command: `nmap -sV --script=${Array.from(selectedScripts).join(',')} -p ${ports.join(',')} ${host.ip} -oN /data/results/service-${host.host_id}-${Date.now()}.txt`
+          }
+        }];
+  - id: execute-nse
+    name: Execute NSE Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      command: >-
+        nmap -sV --script={{ $json.scripts.join(',') }} -p {{ $json.ports.map(p => p.port).join(',') }} {{ $json.ip }} -oX /data/results/service-{{ $json.host_id }}-{{ $execution.id }}.xml
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/scans
+        timeout: 300
+  - id: parse-xml
+    name: Parse XML Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      functionCode: |
+        const fs = require('fs');
+        const xml2js = require('xml2js');
+        
+        const parser = new xml2js.Parser();
+        const xmlData = fs.readFileSync('/data/results/service-' + items[0].json.executionId + '.xml', 'utf8');
+        
+        parser.parseString(xmlData, (err, result) => {
+          if (err) throw err;
+          
+          const services = [];
+          const nmaprun = result.nmaprun;
+          
+          if (nmaprun && nmaprun.host) {
+            for (const host of nmaprun.host) {
+              const addr = host.address?.[0]?.$.addr || '';
+              
+              if (host.ports && host.ports.port) {
+                for (const port of host.ports.port) {
+                  const portId = port.$.portid;
+                  const protocol = port.$.protocol;
+                  const state = port.state?.[0]?.$.state;
+                  
+                  if (state === 'open') {
+                    const service = port.service?.[0] || {};
+                    const scripts = [];
+                    
+                    // Parse NSE script output
+                    if (host.hostscript && host.hostscript.script) {
+                      for (const script of host.hostscript.script) {
+                        scripts.push({
+                          id: script.$.id,
+                          output: script.$.output
+                        });
+                      }
+                    }
+                    
+                    services.push({
+                      json: {
+                        host_id: items[0].json.hostId,
+                        ip: addr,
+                        port: parseInt(portId),
+                        protocol: protocol,
+                        state: state,
+                        service_name: service.$.name || 'unknown',
+                        service_version: service.$.version || '',
+                        service_product: service.$.product || '',
+                        service_extrainfo: service.$.extrainfo || '',
+                        scripts: scripts,
+                        confidence: parseFloat(service.$.confidence) || 0
+                      }
+                    });
+                  }
+                }
+              }
+            }
+          }
+          
+          return services;
+        });
+  - id: store-services
+    name: Store Services
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/services/bulk
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"services": {{ $json }}}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "services_found": {{ $json.length }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Get Open Ports
+          type: main
+          index: 0
+  Get Open Ports:
+    main:
+      - - node: Group Ports by Host
+          type: main
+          index: 0
+  Group Ports by Host:
+    main:
+      - - node: Select NSE Scripts
+          type: main
+          index: 0
+  Select NSE Scripts:
+    main:
+      - - node: Execute NSE Scan
+          type: main
+          index: 0
+  Execute NSE Scan:
+    main:
+      - - node: Parse XML Results
+          type: main
+          index: 0
+  Parse XML Results:
+    main:
+      - - node: Store Services
+          type: main
+          index: 0
+  Store Services:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

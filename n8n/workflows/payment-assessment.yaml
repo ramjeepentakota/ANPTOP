@@ -1,0 +1,215 @@
+id: 20
+name: Payment Systems Assessment
+active: true
+trigger: Approval required
+settings:
+  executionOrder: v1
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/payment-assessment
+      httpMethod: post
+      options: {}
+  - id: stripe-testing
+    name: Stripe API Testing
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 200
+    parameters:
+      command: >-
+        stripe test_trigger payment_intent.create 2>&1 || echo '{"payment":[]}'
+      options:
+        shell: true
+        timeout: 60
+  - id: tls-check
+    name: TLS Configuration Check
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 400
+    parameters:
+      command: >-
+        sslscan --json={{ $json.target }} 2>&1 | head -c 50000 || echo '{"tls":{}}'
+      options:
+        shell: true
+        timeout: 120
+  - id: pci-scan
+    name: PCI-DSS Compliance Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 600
+    parameters:
+      command: >-
+        python3 /opt/pci_scan.py --target {{ $json.target }} --output /tmp/anptop/pci_{{ $execution.id }}.json 2>&1 || echo '{"compliance":[]}'
+      options:
+        shell: true
+        timeout: 300
+  - id: card-data-discovery
+    name: Card Data Discovery
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const targets = {{ $json.targets || '[]' }};
+        
+        const patterns = {
+          pan: /\b(?:\d[ -]*?){13,16}\b/g,
+          cvv: /\b\d{3,4}\b/g,
+          track: /\%B\d{13,19}\^[\w\/]+\^[\d]{4}/g
+        };
+        
+        const results = [];
+        for (const target of targets) {
+          results.push({
+            json: {
+              target: target,
+              scan_type: 'card_data_discovery',
+              patterns_checked: Object.keys(patterns)
+            }
+          });
+        }
+        
+        return results;
+  - id: execute-scan
+    name: Execute Card Scan
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      method: GET
+      url: "{{ $json.target }}"
+      options:
+        timeout: 30
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      functionCode: |
+        const findings = {
+          pci_compliant: true,
+          tls_issues: [],
+          card_data_exposed: false,
+          compliance_gaps: []
+        };
+        
+        for (const item of items) {
+          const output = item.json.stdout || '';
+          
+          // Check TLS issues
+          if (output.includes('SSLv2') || output.includes('SSLv3') || output.includes('TLS 1.0')) {
+            findings.tls_issues.push('Outdated TLS version detected');
+          }
+          if (output.includes('weak cipher')) {
+            findings.tls_issues.push('Weak cipher suites enabled');
+          }
+          
+          // Check PCI compliance
+          if (output.includes('non-compliant')) {
+            findings.pci_compliant = false;
+            findings.compliance_gaps.push('PCI-DSS requirements not met');
+          }
+          
+          // Check for card data patterns
+          const panPattern = /\b(?:\d[ -]*?){13,16}\b/g;
+          if (panPattern.test(output)) {
+            findings.card_data_exposed = true;
+          }
+        }
+        
+        return [{
+          json: {
+            findings: findings,
+            vulnerabilities: findings.tls_issues.length + findings.compliance_gaps.length
+          }
+        }];
+  - id: store-results
+    name: Store Results
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/payment-findings
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "pci_compliant": {{ $json.findings.pci_compliant }}, "tls_issues": {{ $json.findings.tls_issues.length }}, "execution_id": {{ $execution.id }} }
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Stripe Testing
+          type: main
+          index: 0
+      - - node: TLS Check
+          type: main
+          index: 0
+      - - node: PCI Scan
+          type: main
+          index: 0
+  Stripe Testing:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  TLS Check:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  PCI Scan:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Store Results
+          type: main
+          index: 0
+  Store Results:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

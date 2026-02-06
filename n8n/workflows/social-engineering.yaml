@@ -1,0 +1,269 @@
+id: 21
+name: Social Engineering Assessment
+active: true
+trigger: Approval required
+settings:
+  executionOrder: v1
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/social-engineering
+      httpMethod: post
+      options: {}
+  - id: validate-approval
+    name: Validate Approval
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/approvals/{{ $json.approval_id }}/validate
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: gophish
+    name: Gophish Campaign Setup
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 650
+      - 200
+    parameters:
+      method: post
+      url: >-
+        http://localhost:3333/api/campaigns
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: "{{ $env.GOPHISH_API_KEY }}"
+          - name: Content-Type
+            value: "application/json"
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"name": "{{ $json.campaign_name }}", "template_id": {{ $json.template_id }}, "landing_page_id": {{_page_id }}, " $json.landingurl": "{{ $json.target_url }}", "smtp": {"from_address": "{{ $json.from_address }}", "host": "{{ $json.smtp_host }}"}}
+      options:
+        timeout: 60
+  - id: setup-credsniper
+    name: CredSniper Setup
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 400
+    parameters:
+      functionCode: |
+        const config = items[0].json;
+        
+        const credSniperConfig = {
+          module: 'phishing',
+          target_url: config.target_url,
+          callback_url: config.callback_url || 'http://localhost:5000/api/catch',
+          template: config.template || 'generic',
+          port: 5000
+        };
+        
+        return [{
+          json: {
+            ...config,
+            credsniper_config: credSniperConfig,
+            status: 'configured'
+          }
+        }];
+  - id: launch-campaign
+    name: Launch Campaign
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://localhost:3333/api/campaigns/{{ $json.campaign_id }}/launch
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: "{{ $env.GOPHISH_API_KEY }}"
+      options:
+        timeout: 60
+  - id: monitor-campaign
+    name: Monitor Campaign
+    type: n8n-nodes-base.wait
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      amount: "{{ $json.monitor_hours || 24 }}"
+      unit: hours
+      resume: interval
+  - id: get-results
+    name: Get Campaign Results
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://localhost:3333/api/campaigns/{{ $json.campaign_id }}
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: "{{ $env.GOPHISH_API_KEY }}"
+      options:
+        timeout: 60
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      functionCode: |
+        const response = items[0].json;
+        const data = response.data || {};
+        
+        const results = {
+          campaign_name: data.name,
+          status: data.status,
+          sent: data.stats?.sent || 0,
+          opened: data.stats?.opened || 0,
+          clicked: data.stats?.clicked || 0,
+          submitted: data.stats?.submitted || 0,
+          credentials_collected: [],
+          success_rate: 0
+        };
+        
+        // Calculate success rate
+        if (results.sent > 0) {
+          results.success_rate = ((results.submitted / results.sent) * 100).toFixed(2);
+        }
+        
+        // Check for credential submissions
+        if (data.results) {
+          for (const result of data.results) {
+            if (result.submitted_data) {
+              results.credentials_collected.push({
+                email: result.email,
+                submitted_at: result.submitted_at,
+                data: result.submitted_data
+              });
+            }
+          }
+        }
+        
+        return [{
+          json: {
+            ...response,
+            results: results,
+            risk_assessment: {
+              phishing_risk: results.submitted > 0 ? 'high' : 'low',
+              credential_exposure: results.credentials_collected.length > 0,
+              user_awareness: results.opened > 0 ? 'needs_training' : 'unknown'
+            }
+          }
+        }];
+  - id: store-results
+    name: Store Results
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/se-results
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1850
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "sent": {{ $json.results.sent }}, "clicked": {{ $json.results.clicked }}, "submitted": {{ $json.results.submitted }}, "success_rate": "{{ $json.results.success_rate }}%", "execution_id": {{ $execution.id }} }
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Validate Approval
+          type: main
+          index: 0
+  Validate Approval:
+    main:
+      - - node: Gophish
+          type: main
+          index: 0
+      - - node: Setup CredSniper
+          type: main
+          index: 0
+  Gophish:
+    main:
+      - - node: Launch Campaign
+          type: main
+          index: 0
+  Setup CredSniper:
+    main:
+      - - node: Launch Campaign
+          type: main
+          index: 0
+  Launch Campaign:
+    main:
+      - - node: Monitor Campaign
+          type: main
+          index: 0
+  Monitor Campaign:
+    main:
+      - - node: Get Results
+          type: main
+          index: 0
+  Get Results:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Store Results
+          type: main
+          index: 0
+  Store Results:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

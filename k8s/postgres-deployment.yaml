@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anptop-postgres
+  namespace: anptop
+  labels:
+    app: anptop-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: anptop-postgres
+  template:
+    metadata:
+      labels:
+        app: anptop-postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: anptop-secrets
+              key: postgres_user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: anptop-secrets
+              key: postgres_password
+        - name: POSTGRES_DB
+          value: "anptop"
+        ports:
+        - containerPort: 5432
+          name: postgres
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-config
+          mountPath: /etc/postgresql/postgresql.conf
+          subPath: postgresql.conf
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - anptop
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - anptop
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: anptop-postgres-pvc
+      - name: postgres-config
+        configMap:
+          name: anptop-postgres-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anptop-postgres
+  namespace: anptop
+spec:
+  selector:
+    app: anptop-postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  clusterIP: None
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: anptop-postgres-pvc
+  namespace: anptop
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: anptop-postgres-config
+  namespace: anptop
+data:
+  postgresql.conf: |
+    listen_addresses = '*'
+    max_connections = 100
+    shared_buffers = 256MB
+    work_mem = 4MB
+    maintenance_work_mem = 128MB
+    log_connections = on
+    log_disconnections = on
+    log_statement = 'ddl'
+    log_min_duration_statement = 1000
+    ssl = off

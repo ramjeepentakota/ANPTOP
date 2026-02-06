@@ -1,0 +1,297 @@
+id: 14
+name: Cloud Discovery
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/cloud-discovery
+      httpMethod: post
+      options: {}
+  - id: get-config
+    name: Get Cloud Config
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/cloud-config
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: aws-discovery
+    name: AWS Discovery
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 150
+    parameters:
+      functionCode: |
+        const config = items[0].json;
+        const awsRegion = config.aws_region || 'us-east-1';
+        
+        const commands = [
+          { name: 'List IAM Users', command: `aws iam list-users --region ${awsRegion} --output json 2>/dev/null || echo '{"Users":[]}'` },
+          { name: 'List IAM Roles', command: `aws iam list-roles --region ${awsRegion} --output json 2>/dev/null || echo '{"Roles":[]}'` },
+          { name: 'List S3 Buckets', command: `aws s3 ls --recursive 2>/dev/null || echo "No S3 access"` },
+          { name: 'List EC2 Instances', command: `aws ec2 describe-instances --region ${awsRegion} --output json 2>/dev/null || echo '{"Reservations":[]}'` },
+          { name: 'List VPCs', command: `aws ec2 describe-vpcs --region ${awsRegion} --output json 2>/dev/null || echo '{"Vpcs":[]}'` },
+          { name: 'List Lambda Functions', command: `aws lambda list-functions --region ${awsRegion} --output json 2>/dev/null || echo '{"Functions":[]}'` },
+          { name: 'List RDS Instances', command: `aws rds describe-db-instances --region ${awsRegion} --output json 2>/dev/null || echo '{"DBInstances":[]}'` },
+          { name: 'List Security Groups', command: `aws ec2 describe-security-groups --region ${awsRegion} --output json 2>/dev/null || echo '{"SecurityGroups":[]}'` },
+          { name: 'List CloudTrail', command: `aws cloudtrail describe-trails --output json 2>/dev/null || echo '{"trailList":[]}'` },
+          { name: 'List Secrets', command: `aws secretsmanager list-secrets --region ${awsRegion} --output json 2>/dev/null || echo '{"SecretList":[]}'` }
+        ];
+        
+        return commands.map(cmd => ({ json: { ...config, ...cmd, provider: 'aws', status: 'pending' } }));
+    parameters:
+      condition: "{{ $json.provider === 'aws' || $json.providers.includes('aws') }}"
+  - id: azure-discovery
+    name: Azure Discovery
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const config = items[0].json;
+        
+        const commands = [
+          { name: 'List Subscriptions', command: `az account list --output json 2>/dev/null || echo '[]'` },
+          { name: 'List VMs', command: `az vm list --all --output json 2>/dev/null || echo '[]'` },
+          { name: 'List Network Interfaces', command: `az network nic list --output json 2>/dev/null || echo '[]'` },
+          { name: 'List Storage Accounts', command: `az storage account list --output json 2>/dev/null || echo '[]'` },
+          { name: 'List Key Vaults', command: `az keyvault list --output json 2>/dev/null || echo '[]'` },
+          { name: 'List AD Users', command: `az ad user list --output json 2>/dev/null || echo '[]'` },
+          { name: 'List Security Groups', command: `az network nsg list --output json 2>/dev/null || echo '[]'` },
+          { name: 'List SQL Servers', command: `az sql server list --output json 2>/dev/null || echo '[]'` }
+        ];
+        
+        return commands.map(cmd => ({ json: { ...config, ...cmd, provider: 'azure', status: 'pending' } }));
+    parameters:
+      condition: "{{ $json.provider === 'azure' || $json.providers.includes('azure') }}"
+  - id: gcp-discovery
+    name: GCP Discovery
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 450
+    parameters:
+      functionCode: |
+        const config = items[0].json;
+        
+        const commands = [
+          { name: 'List Projects', command: `gcloud projects list --format json 2>/dev/null || echo '[]'` },
+          { name: 'List Compute Instances', command: `gcloud compute instances list --format json 2>/dev/null || echo '[]'` },
+          { name: 'List VPC Networks', command: `gcloud compute networks list --format json 2>/dev/null || echo '[]'` },
+          { name: 'List Storage Buckets', command: `gsutil ls 2>/dev/null || echo '[]'` },
+          { name: 'List IAM Policies', command: `gcloud projects get-iam-policy --format json 2>/dev/null || echo '{}'` },
+          { name: 'List Cloud Functions', command: `gcloud functions list --format json 2>/dev/null || echo '[]'` },
+          { name: 'List BigQuery Datasets', command: `bq ls --format json 2>/dev/null || echo '[]'` },
+          { name: 'List Security Command Center', command: `gcloud scc findings list --format json 2>/dev/null || echo '[]'` }
+        ];
+        
+        return commands.map(cmd => ({ json: { ...config, ...cmd, provider: 'gcp', status: 'pending' } }));
+    parameters:
+      condition: "{{ $json.provider === 'gcp' || $json.providers.includes('gcp') }}"
+  - id: execute-discovery
+    name: Execute Discovery
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      command: "{{ $json.command }}"
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/cloud
+        timeout: "{{ $json.timeout || 120 }}"
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      functionCode: |
+        const result = items[0].json;
+        const output = result.stdout || '';
+        
+        // Extract findings based on command type
+        const findings = {
+          provider: result.provider,
+          command_name: result.name,
+          resources_found: [],
+          permissions_issues: [],
+          sensitive_data: []
+        };
+        
+        try {
+          const data = JSON.parse(output);
+          
+          if (Array.isArray(data)) {
+            findings.resources_found = data.map(item => ({
+              name: item.Name || item.name || item.UserName || item.DisplayName || 'Unknown',
+              type: result.name
+            }));
+          } else if (data.Users) {
+            findings.resources_found = data.Users.map(u => ({ name: u.UserName, type: 'IAM User' }));
+          } else if (data.Vpcs) {
+            findings.resources_found = data.Vpcs.map(v => ({ id: v.VpcId, type: 'VPC' }));
+          }
+        } catch (e) {
+          // Non-JSON output
+          if (output.includes('No S3 access') || output.includes('denied')) {
+            findings.permissions_issues.push(`${result.name}: Access denied`);
+          }
+        }
+        
+        return [{
+          json: {
+            ...result,
+            findings: findings,
+            parsed: true
+          }
+        }];
+  - id: aggregate-results
+    name: Aggregate Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      functionCode: |
+        const results = items;
+        const provider = results[0]?.json?.provider || 'unknown';
+        
+        const aggregated = {
+          provider: provider,
+          total_resources: 0,
+          findings_by_type: {},
+          permissions_issues: [],
+          sensitive_assets: [],
+          timestamp: new Date().toISOString()
+        };
+        
+        for (const item of results) {
+          const finding = item.json?.findings;
+          if (finding) {
+            aggregated.total_resources += finding.resources_found?.length || 0;
+            aggregated.permissions_issues.push(...(finding.permissions_issues || []));
+          }
+        }
+        
+        return [{
+          json: {
+            ...results[0]?.json,
+            aggregated_findings: aggregated,
+            raw_results: results.map(r => r.json)
+          }
+        }];
+  - id: store-findings
+    name: Store Findings
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/cloud-findings
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "provider": "{{ $json.provider }}", "resources_found": {{ $json.aggregated_findings.total_resources }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Get Cloud Config
+          type: main
+          index: 0
+  Get Cloud Config:
+    main:
+      - - node: AWS Discovery
+          type: main
+          index: 0
+      - - node: Azure Discovery
+          type: main
+          index: 0
+      - - node: GCP Discovery
+          type: main
+          index: 0
+  AWS Discovery:
+    main:
+      - - node: Execute Discovery
+          type: main
+          index: 0
+  Azure Discovery:
+    main:
+      - - node: Execute Discovery
+          type: main
+          index: 0
+  GCP Discovery:
+    main:
+      - - node: Execute Discovery
+          type: main
+          index: 0
+  Execute Discovery:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Aggregate Results
+          type: main
+          index: 0
+  Aggregate Results:
+    main:
+      - - node: Store Findings
+          type: main
+          index: 0
+  Store Findings:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

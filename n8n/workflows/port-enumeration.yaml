@@ -1,0 +1,503 @@
+id: 5
+name: Dynamic Port-Based Enumeration
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/port-enumeration
+      httpMethod: post
+      options: {}
+  - id: get-discovered-services
+    name: Get Discovered Services
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/services
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: route-by-port
+    name: Route by Port
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const services = items[0].json.services || [];
+        
+        // Group services by port type
+        const routes = {
+          web: [],
+          smb: [],
+          ssh: [],
+          smtp: [],
+          database: [],
+          other: []
+        };
+        
+        const portGroups = {
+          web: [80, 443, 8080, 8443, 8000, 5000],
+          smb: [139, 445],
+          ssh: [22],
+          smtp: [25, 465, 587, 2525],
+          database: [1433, 3306, 5432, 27017, 6379, 8086],
+        };
+        
+        for (const service of services) {
+          const port = service.port;
+          let routed = false;
+          
+          for (const [group, ports] of Object.entries(portGroups)) {
+            if (ports.includes(port)) {
+              routes[group].push(service);
+              routed = true;
+              break;
+            }
+          }
+          
+          if (!routed) {
+            routes.other.push(service);
+          }
+        }
+        
+        // Return routing decisions
+        const routing = [];
+        
+        for (const [type, services] of Object.entries(routes)) {
+          if (services.length > 0) {
+            routing.push({
+              json: {
+                type: type,
+                services: services,
+                count: services.length
+              }
+            });
+          }
+        }
+        
+        return routing;
+  - id: web-enumeration
+    name: Web Service Enumeration
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 150
+    parameters:
+      functionCode: |
+        const services = items[0].json.services || [];
+        const commands = [];
+        
+        for (const service of services) {
+          const ip = service.ip;
+          const port = service.port;
+          const https = port === 443 || port === 8443;
+          const url = `http${https ? 's' : ''}://${ip}:${port}`;
+          
+          // Gobuster directory enumeration
+          commands.push({
+            json: {
+              type: 'gobuster',
+              service_id: service.id,
+              ip: ip,
+              port: port,
+              url: url,
+              command: `gobuster dir -u ${url}/ -w /usr/share/wordlists/dirb/common.txt -o /data/results/gobuster_${ip}_${port}.txt -t 50`,
+              timeout: 300
+            }
+          });
+          
+          // Nikto web scanning
+          commands.push({
+            json: {
+              type: 'nikto',
+              service_id: service.id,
+              ip: ip,
+              port: port,
+              url: url,
+              command: `nikto -h ${url} -o /data/results/nikto_${ip}_${port}.txt`,
+              timeout: 300
+            }
+          });
+          
+          // WhatWeb fingerprinting
+          commands.push({
+            json: {
+              type: 'whatweb',
+              service_id: service.id,
+              ip: ip,
+              port: port,
+              url: url,
+              command: `whatweb -v ${url} -o /data/results/whatweb_${ip}_${port}.txt`,
+              timeout: 120
+            }
+          });
+        }
+        
+        return commands;
+    parameters:
+      condition: "{{ $json.type === 'web' }}"
+  - id: smb-enumeration
+    name: SMB Service Enumeration
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      functionCode: |
+        const services = items[0].json.services || [];
+        const commands = [];
+        
+        for (const service of services) {
+          const ip = service.ip;
+          
+          // Enum4linux
+          commands.push({
+            json: {
+              type: 'enum4linux',
+              service_id: service.id,
+              ip: ip,
+              command: `enum4linux -a ${ip} > /data/results/enum4linux_${ip}.txt`,
+              timeout: 300
+            }
+          });
+          
+          // Nmap SMB scripts
+          commands.push({
+            json: {
+              type: 'nmap-smb',
+              service_id: service.id,
+              ip: ip,
+              command: `nmap -p 139,445 --script=smb-enum-shares,smb-enum-users,smb-os-discovery ${ip} -oN /data/results/smb_${ip}.txt`,
+              timeout: 180
+            }
+          });
+          
+          // SMBClient connection test
+          commands.push({
+            json: {
+              type: 'smbclient',
+              service_id: service.id,
+              ip: ip,
+              command: `smbclient -L ${ip} -N > /data/results/smbclient_${ip}.txt 2>&1 || echo "SMB access failed"`,
+              timeout: 60
+            }
+          });
+        }
+        
+        return commands;
+    parameters:
+      condition: "{{ $json.type === 'smb' }}"
+  - id: ssh-enumeration
+    name: SSH Service Enumeration
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 450
+    parameters:
+      functionCode: |
+        const services = items[0].json.services || [];
+        const commands = [];
+        
+        for (const service of services) {
+          const ip = service.ip;
+          
+          // SSH audit
+          commands.push({
+            json: {
+              type: 'ssh-audit',
+              service_id: service.id,
+              ip: ip,
+              port: service.port,
+              command: `ssh-audit -b ${ip}:${service.port} > /data/results/ssh_audit_${ip}.txt 2>&1 || echo "SSH audit failed"`,
+              timeout: 60
+            }
+          });
+          
+          // Nmap SSH scripts
+          commands.push({
+            json: {
+              type: 'nmap-ssh',
+              service_id: service.id,
+              ip: ip,
+              command: `nmap -p 22 --script=ssh-auth-methods,ssh2-enum-algos,ssh-hostkey ${ip} -oN /data/results/ssh_${ip}.txt`,
+              timeout: 120
+            }
+          });
+        }
+        
+        return commands;
+    parameters:
+      condition: "{{ $json.type === 'ssh' }}"
+  - id: smtp-enumeration
+    name: SMTP Service Enumeration
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 600
+    parameters:
+      functionCode: |
+        const services = items[0].json.services || [];
+        const commands = [];
+        
+        for (const service of services) {
+          const ip = service.ip;
+          
+          // Nmap SMTP scripts
+          commands.push({
+            json: {
+              type: 'nmap-smtp',
+              service_id: service.id,
+              ip: ip,
+              command: `nmap -p 25,465,587 --script=smtp-commands,smtp-enum-users,smtp-ntlm-info ${ip} -oN /data/results/smtp_${ip}.txt`,
+              timeout: 120
+            }
+          });
+          
+          // SMTP user enumeration
+          commands.push({
+            json: {
+              type: 'smtp-user-enum',
+              service_id: service.id,
+              ip: ip,
+              command: `smtp-user-enum -M VRFY -U /usr/share/wordlists/metasploit/unix_users.txt -t ${ip} > /data/results/smtp_user_${ip}.txt 2>&1 || echo "SMTP enum failed"`,
+              timeout: 120
+            }
+          });
+        }
+        
+        return commands;
+    parameters:
+      condition: "{{ $json.type === 'smtp' }}"
+  - id: database-enumeration
+    name: Database Service Enumeration
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 750
+    parameters:
+      functionCode: |
+        const services = items[0].json.services || [];
+        const commands = [];
+        
+        for (const service of services) {
+          const ip = service.ip;
+          const port = service.port;
+          
+          let dbType = 'unknown';
+          if (port === 1433) dbType = 'mssql';
+          else if (port === 3306) dbType = 'mysql';
+          else if (port === 5432) dbType = 'postgres';
+          else if (port === 27017) dbType = 'mongodb';
+          
+          // Nmap database scripts
+          commands.push({
+            json: {
+              type: 'nmap-db',
+              service_id: service.id,
+              ip: ip,
+              port: port,
+              db_type: dbType,
+              command: `nmap -p ${port} --script=${dbType}-info,${dbType}--empty-password ${ip} -oN /data/results/${dbType}_${ip}.txt`,
+              timeout: 120
+            }
+          });
+        }
+        
+        return commands;
+    parameters:
+      condition: "{{ $json.type === 'database' }}"
+  - id: execute-commands
+    name: Execute Enumeration
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      command: "{{ $json.command }}"
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/enumeration
+        timeout: "{{ $json.timeout || 300 }}"
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      functionCode: |
+        const fs = require('fs');
+        
+        const result = items[0].json;
+        const command = result.command;
+        const output = result.stdout || '';
+        const error = result.stderr || '';
+        
+        // Parse based on enumeration type
+        const findings = [];
+        
+        if (result.type === 'gobuster') {
+          // Parse directory findings
+          const lines = output.split('\n');
+          for (const line of lines) {
+            if (line.includes('(Status:')) {
+              const match = line.match(/^(.+?)\s+\(Status:(\d+)\)/);
+              if (match) {
+                findings.push({
+                  url: result.url + '/' + match[1],
+                  status: parseInt(match[2])
+                });
+              }
+            }
+          }
+        } else if (result.type === 'nmap-smb' || result.type === 'nmap-ssh') {
+          // Nmap output parsing
+          if (output.includes('SMB') || output.includes('SSH')) {
+            findings.push({
+              service: result.type,
+              ip: result.ip,
+              details: output.substring(0, 500)
+            });
+          }
+        }
+        
+        return [{
+          json: {
+            service_id: result.service_id,
+            type: result.type,
+            ip: result.ip,
+            port: result.port || 0,
+            findings: findings,
+            raw_output: output.substring(0, 2000),
+            error: error.substring(0, 500)
+          }
+        }];
+  - id: store-findings
+    name: Store Findings
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/enumeration-results
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "services_enumerated": {{ $json.length }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Get Discovered Services
+          type: main
+          index: 0
+  Get Discovered Services:
+    main:
+      - - node: Route by Port
+          type: main
+          index: 0
+  Route by Port:
+    main:
+      - - node: Web Enumeration
+          type: main
+          index: 0
+      - - node: SMB Enumeration
+          type: main
+          index: 0
+      - - node: SSH Enumeration
+          type: main
+          index: 0
+      - - node: SMTP Enumeration
+          type: main
+          index: 0
+      - - node: Database Enumeration
+          type: main
+          index: 0
+  Web Enumeration:
+    main:
+      - - node: Execute Enumeration
+          type: main
+          index: 0
+  SMB Enumeration:
+    main:
+      - - node: Execute Enumeration
+          type: main
+          index: 0
+  SSH Enumeration:
+    main:
+      - - node: Execute Enumeration
+          type: main
+          index: 0
+  SMTP Enumeration:
+    main:
+      - - node: Execute Enumeration
+          type: main
+          index: 0
+  Database Enumeration:
+    main:
+      - - node: Execute Enumeration
+          type: main
+          index: 0
+  Execute Enumeration:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Store Findings
+          type: main
+          index: 0
+  Store Findings:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

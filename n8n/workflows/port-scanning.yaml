@@ -1,0 +1,127 @@
+id: 2
+name: Full Port Scanning
+active: true
+settings:
+  executionOrder: v1
+nodes:
+  - id: webhook
+    name: Webhook
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 300
+      - 300
+    parameters:
+      path: anptop/port-scanning
+      httpMethod: post
+  - id: masscan
+    name: Masscan Fast Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 500
+      - 300
+    parameters:
+      command: >-
+        masscan {{ $json.target_ip }} -p1-65535 --rate=10000 
+        -oX /data/results/port-scan-{{ $execution.id }}.xml
+      options:
+        shell: true
+  - id: rustscan
+    name: RustScan Quick
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 700
+      - 300
+    parameters:
+      command: >-
+        rustscan -a {{ $json.target_ip }} --ulimit 5000 
+        -n --json > /data/results/rustscan-{{ $execution.id }}.json
+      options:
+        shell: true
+  - id: nmap-detailed
+    name: Nmap Detailed Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 900
+      - 300
+    parameters:
+      command: >-
+        nmap -sV -sC -O -p{{ $json.ports }} {{ $json.target_ip }}
+        -oX /data/results/nmap-detail-{{ $execution.id }}.xml
+      options:
+        shell: true
+  - id: parse-ports
+    name: Parse Port Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1100
+      - 300
+    parameters:
+      functionCode: |
+        const fs = require('fs');
+        const xml2js = require('xml2js');
+        const parser = new xml2js.Parser();
+        
+        const results = [];
+        
+        // Parse Masscan results
+        try {
+          const masscanXml = fs.readFileSync('/data/results/port-scan-' + items[0].json.executionId + '.xml', 'utf8');
+          parser.parseString(masscanXml, (err, result) => {
+            if (!err) {
+              const hosts = result.nmaprun?.host || [];
+              hosts.forEach(host => {
+                const ports = host.ports?.port || [];
+                ports.forEach(port => {
+                  results.push({
+                    port: parseInt(port.$.portid),
+                    protocol: port.$.protocol,
+                    state: port.state?.[0]?.$.state,
+                    service: port.service?.[0]?.$.name,
+                    product: port.service?.[0]?.$.product,
+                    version: port.service?.[0]?.$.version,
+                  });
+                });
+              });
+            }
+          });
+        } catch (e) {}
+        
+        return results.map(r => ({ json: r }));
+  - id: update-target
+    name: Update Target
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1300
+      - 300
+    parameters:
+      method: put
+      url: >-
+        http://backend:8000/api/v1/targets/{{ $json.target_id }}
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"ports": {{ $json.ports }}, "services": {{ $json.services }}, "status": "scanned"}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1500
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "ports_found": {{ $json.length }}, "execution_id": {{ $execution.id }} }

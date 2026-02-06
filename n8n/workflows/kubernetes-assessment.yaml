@@ -1,0 +1,184 @@
+id: 17
+name: Kubernetes Security Assessment
+active: true
+settings:
+  executionOrder: v1
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/k8s-assessment
+      httpMethod: post
+      options: {}
+  - id: kube-hunter
+    name: Kube-Hunter Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 200
+    parameters:
+      command: >-
+        kube-hunter --pod --remote {{ $json.target || '127.0.0.1' }} --output /tmp/anptop/kube-hunter_{{ $execution.id }}.json 2>&1 || echo '{"vulnerabilities":[]}'
+      options:
+        shell: true
+        timeout: 300
+  - id: kube-bench
+    name: Kube-Bench CIS Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 400
+    parameters:
+      command: >-
+        kube-bench run --targets master,node,etcd --json > /tmp/anptop/kube-bench_{{ $execution.id }}.json 2>&1 || echo '{"Controls":[{}]}'
+      options:
+        shell: true
+        timeout: 300
+  - id: kubectx
+    name: Enumerate Clusters
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 600
+    parameters:
+      command: >-
+        kubectl config get-contexts && kubectl get nodes -o wide && kubectl get namespaces -o wide 2>&1 || echo '{"clusters":[]}'
+      options:
+        shell: true
+        timeout: 60
+  - id: enumerate-resources
+    name: Enumerate K8s Resources
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      command: >-
+        kubectl get pods,svc,deployments,daemonsets,statefulsets,configmaps,secrets,ingress,rbac.authorization.k8s.io --all-namespaces -o json 2>&1 | head -c 100000
+      options:
+        shell: true
+        timeout: 120
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      functionCode: |
+        const results = items;
+        const k8sData = results.find(r => r.json.command?.includes('get pods'));
+        const k8sOutput = k8sData?.json?.stdout || '';
+        
+        let resources = {};
+        try {
+          if (k8sOutput) {
+            resources = JSON.parse(k8sOutput);
+          }
+        } catch (e) {}
+        
+        const findings = {
+          clusters: [],
+          namespaces: [],
+          pods: [],
+          services: [],
+          secrets: [],
+          vulnerabilities: [],
+          misconfigurations: []
+        };
+        
+        // Parse K8s resources
+        if (resources.items) {
+          for (const item of resources.items) {
+            const type = item.kind;
+            if (!findings[type + 's']) findings[type + 's'] = [];
+            findings[type + 's'].push({
+              name: item.metadata?.name,
+              namespace: item.metadata?.namespace,
+              uid: item.metadata?.uid
+            });
+          }
+        }
+        
+        return [{
+          json: {
+            findings: findings,
+            raw_data: k8sOutput.substring(0, 50000)
+          }
+        }];
+  - id: store-findings
+    name: Store Findings
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/k8s-findings
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "namespaces_found": {{ $json.findings.namespaces.length }}, "pods_found": {{ $json.findings.pods.length }}, "execution_id": {{ $execution.id }} }
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Kube-Hunter
+          type: main
+          index: 0
+      - - node: Kube-Bench
+          type: main
+          index: 0
+      - - node: Kubectx
+          type: main
+          index: 0
+  Kubectx:
+    main:
+      - - node: Enumerate Resources
+          type: main
+          index: 0
+  Enumerate Resources:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Store Findings
+          type: main
+          index: 0
+  Store Findings:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

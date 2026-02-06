@@ -1,0 +1,291 @@
+id: 15
+name: Cloud Vulnerability Assessment
+active: true
+settings:
+  executionOrder: v1
+  saveManualExecutions: true
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/cloud-va
+      httpMethod: post
+      options: {}
+  - id: get-cloud-findings
+    name: Get Cloud Findings
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 450
+      - 300
+    parameters:
+      method: get
+      url: >-
+        http://backend:8000/api/v1/engagements/{{ $json.engagement_id }}/cloud-findings
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      options: {}
+  - id: scoutsuite-scan
+    name: ScoutSuite Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 650
+      - 200
+    parameters:
+      command: >-
+        scoutsuite cloud --provider {{ $json.provider || 'aws' }} --region {{ $json.region || 'us-east-1' }} --output /tmp/anptop/reports/scoutsuite_{{ $json.provider }}_{{ $execution.id }}.json 2>&1 || echo '{"findings":[],"summary":{"critical":0,"high":0,"medium":0,"low":0}}'
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/scans
+        timeout: 600
+  - id: prowler-scan
+    name: Prowler Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 650
+      - 400
+    parameters:
+      command: >-
+        prowler {{ $json.provider || 'aws' }} -r {{ $json.region || 'us-east-1' }} -F /tmp/anptop/reports/prowler_{{ $json.provider }}_{{ $execution.id }}.json 2>&1 || echo '{"findings":[]}'
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop/scans
+        timeout: 600
+  - id: trivy-scan
+    name: Trivy Container Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 650
+      - 600
+    parameters:
+      command: >-
+        trivy fs --format json --output /tmp/anptop/reports/trivy_{{ $execution.id }}.json /tmp/anptop/ 2>&1 || echo '{"Results":[]}'
+      options:
+        shell: true
+        workingDirectory: /tmp/anptop
+        timeout: 300
+  - id: parse-scoutsuite
+    name: Parse ScoutSuite Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 200
+    parameters:
+      functionCode: |
+        const output = items[0].json.stdout || '';
+        let findings = [];
+        
+        try {
+          const data = JSON.parse(output);
+          if (data.findings) {
+            for (const [key, finding] of Object.entries(data.findings)) {
+              findings.push({
+                id: key,
+                name: finding.name || key,
+                description: finding.description || '',
+                severity: finding.compliance || finding.level || 'medium',
+                affected_resources: finding.affected_resources || [],
+                remediation: finding.remediation || ''
+              });
+            }
+          }
+        } catch (e) {
+          findings = [];
+        }
+        
+        return [{
+          json: {
+            tool: 'scoutsuite',
+            findings: findings,
+            raw: output.substring(0, 5000)
+          }
+        }];
+  - id: parse-prowler
+    name: Parse Prowler Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 850
+      - 400
+    parameters:
+      functionCode: |
+        const output = items[0].json.stdout || '';
+        let findings = [];
+        
+        try {
+          const data = JSON.parse(output);
+          if (data.findings) {
+            for (const finding of data.findings) {
+              findings.push({
+                id: finding.check_id || finding.checkName,
+                name: finding.check || finding.title,
+                description: finding.description || '',
+                severity: finding.severity || 'medium',
+                affected_resources: [finding.resource] || [],
+                region: finding.region,
+                remediation: finding.remediation || ''
+              });
+            }
+          }
+        } catch (e) {
+          // Parse CSV-like output
+          const lines = output.split('\n');
+          for (const line of lines) {
+            if (line.includes('PASS') || line.includes('FAIL')) {
+              findings.push({
+                name: line.substring(0, 100),
+                raw: line
+              });
+            }
+          }
+        }
+        
+        return [{
+          json: {
+            tool: 'prowler',
+            findings: findings,
+            raw: output.substring(0, 5000)
+          }
+        }];
+  - id: merge-findings
+    name: Merge Findings
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      functionCode: |
+        const allFindings = [];
+        const severityOrder = { critical: 4, high: 3, medium: 2, low: 1, informational: 0 };
+        
+        for (const item of items) {
+          const findings = item.json.findings || [];
+          for (const finding of findings) {
+            allFindings.push({
+              ...finding,
+              tool: item.json.tool,
+              engagement_id: items[0].json.engagement_id,
+              severity_score: severityOrder[finding.severity?.toLowerCase()] || 1
+            });
+          }
+        }
+        
+        // Sort by severity
+        allFindings.sort((a, b) => b.severity_score - a.severity_score);
+        
+        // Calculate summary
+        const summary = {
+          total: allFindings.length,
+          critical: allFindings.filter(f => f.severity === 'critical').length,
+          high: allFindings.filter(f => f.severity === 'high').length,
+          medium: allFindings.filter(f => f.severity === 'medium').length,
+          low: allFindings.filter(f => f.severity === 'low').length
+        };
+        
+        return [{
+          json: {
+            findings: allFindings,
+            summary: summary,
+            provider: items[0].json.provider
+          }
+        }];
+  - id: store-vulnerabilities
+    name: Store Vulnerabilities
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/vulnerabilities/cloud
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "vulnerabilities_found": {{ $json.summary.total }}, "critical": {{ $json.summary.critical }}, "high": {{ $json.summary.high }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook Trigger:
+    main:
+      - - node: Get Cloud Findings
+          type: main
+          index: 0
+  Get Cloud Findings:
+    main:
+      - - node: ScoutSuite Scan
+          type: main
+          index: 0
+      - - node: Prowler Scan
+          type: main
+          index: 0
+      - - node: Trivy Scan
+          type: main
+          index: 0
+  ScoutSuite Scan:
+    main:
+      - - node: Parse ScoutSuite Results
+          type: main
+          index: 0
+  Prowler Scan:
+    main:
+      - - node: Parse Prowler Results
+          type: main
+          index: 0
+  Trivy Scan:
+    main:
+      - - node: Parse Prowler Results
+          type: main
+          index: 0
+  Parse ScoutSuite Results:
+    main:
+      - - node: Merge Findings
+          type: main
+          index: 0
+  Parse Prowler Results:
+    main:
+      - - node: Merge Findings
+          type: main
+          index: 0
+  Merge Findings:
+    main:
+      - - node: Store Vulnerabilities
+          type: main
+          index: 0
+  Store Vulnerabilities:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

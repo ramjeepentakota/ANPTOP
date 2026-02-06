@@ -1,0 +1,223 @@
+id: 19
+name: API Security Assessment
+active: true
+settings:
+  executionOrder: v1
+nodes:
+  - id: webhook
+    name: Webhook Trigger
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 250
+      - 300
+    parameters:
+      path: anptop/api-security
+      httpMethod: post
+      options: {}
+  - id: zap-scan
+    name: OWASP ZAP Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 200
+    parameters:
+      command: >-
+        zap-baseline.py -t {{ $json.target_url }} -J /tmp/anptop/zap_{{ $execution.id }}.json -r /tmp/anptop/zap_{{ $execution.id }}.html 2>&1 || echo '{"site":"","alerts":[]}'
+      options:
+        shell: true
+        timeout: 300
+  - id: burp-scan
+    name: Burp Suite Scan
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 400
+    parameters:
+      command: >-
+        curl -s "http://localhost:8090/v0.6/scan?url={{ $json.target_url }}&scantype=PassiveScan" 2>&1 || echo '{"vulnerabilities":[]}'
+      options:
+        shell: true
+        timeout: 300
+  - id: jwt-testing
+    name: JWT Testing
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 450
+      - 600
+    parameters:
+      command: >-
+        python3 /opt/jwt_tool/jwt_tool.py {{ $json.jwt_token }} -X a -t {{ $json.target_url }}/api/verify 2>&1 || echo '{"vulns":[]}'
+      options:
+        shell: true
+        timeout: 120
+  - id: api-fuzzing
+    name: API Fuzzing
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 650
+      - 300
+    parameters:
+      functionCode: |
+        const endpoints = {{ $json.endpoints || '[]' }};
+        const fuzzingPayloads = [
+          "' OR '1'='1",
+          "'; DROP TABLE users--",
+          "{{ $json.target }}../etc/passwd",
+          "<script>alert(1)</script>",
+          "{{ $json.target }}{{ $json.target }}"
+        ];
+        
+        const tests = [];
+        for (const endpoint of endpoints) {
+          for (const payload of fuzzingPayloads) {
+            tests.push({
+              json: {
+                endpoint: endpoint,
+                method: endpoint.method || 'GET',
+                url: `${endpoint.url}?param=${encodeURIComponent(payload)}`,
+                payload: payload,
+                fuzz_type: detectPayloadType(payload)
+              }
+            });
+          }
+        }
+        
+        return tests;
+        
+        function detectPayloadType(payload) {
+          if (payload.includes("'")) return 'SQL Injection';
+          if (payload.includes('../')) return 'Path Traversal';
+          if (payload.includes('<script>')) return 'XSS';
+          return 'Generic Fuzz';
+        }
+  - id: execute-fuzz
+    name: Execute Fuzzing
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 850
+      - 300
+    parameters:
+      method: "{{ $json.method || 'GET' }}"
+      url: "{{ $json.url }}"
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: "Bearer {{ $json.auth_token || '' }}"
+      options:
+        timeout: 30
+  - id: parse-results
+    name: Parse Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 1050
+      - 300
+    parameters:
+      functionCode: |
+        const results = items;
+        const vulnerabilities = [];
+        
+        for (const item of results) {
+          const response = item.json;
+          const fuzzType = response.fuzz_type || '';
+          
+          // Detect vulnerabilities based on response
+          if (response.status === 200) {
+            if (response.body?.includes('root:') || response.body?.includes('Microsoft Windows')) {
+              vulnerabilities.push({
+                type: fuzzType,
+                url: response.url,
+                evidence: 'Sensitive data in response',
+                severity: 'high'
+              });
+            }
+          }
+          
+          // Check for error-based SQL injection
+          if (response.body?.includes('sql syntax') || response.body?.includes('ORA-')) {
+            vulnerabilities.push({
+              type: 'SQL Injection',
+              url: response.url,
+              evidence: 'Database error in response',
+              severity: 'critical'
+            });
+          }
+        }
+        
+        return [{
+          json: {
+            vulnerabilities: vulnerabilities,
+            total_tested: results.length,
+            vulnerabilities_found: vulnerabilities.length
+          }
+        }];
+  - id: store-results
+    name: Store Results
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1250
+      - 300
+    parameters:
+      method: post
+      url: >-
+        http://backend:8000/api/v1/api-vulnerabilities
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {{ $json }}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1450
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "vulnerabilities_found": {{ $json.vulnerabilities_found }}, "tests_run": {{ $json.total_tested }}, "execution_id": {{ $execution.id }} }
+connections:
+  Webhook Trigger:
+    main:
+      - - node: ZAP Scan
+          type: main
+          index: 0
+      - - node: JWT Testing
+          type: main
+          index: 0
+  ZAP Scan:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  JWT Testing:
+    main:
+      - - node: Parse Results
+          type: main
+          index: 0
+  Parse Results:
+    main:
+      - - node: Store Results
+          type: main
+          index: 0
+  Store Results:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

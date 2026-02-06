@@ -1,0 +1,129 @@
+id: 1
+name: Host Discovery
+active: true
+settings:
+  executionOrder: v1
+nodes:
+  - id: webhook
+    name: Webhook
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 300
+      - 300
+    parameters:
+      path: anptop/host-discovery
+      httpMethod: post
+      options: {}
+  - id: extract-targets
+    name: Extract Targets
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 500
+      - 300
+    parameters:
+      functionCode: |
+        const targets = items[0].json.body.targets || [];
+        return targets.map(target => ({ json: { target } }));
+  - id: nmap-ping
+    name: Nmap Ping Sweep
+    type: n8n-nodes-base.executeCommand
+    typeVersion: 1
+    position:
+      - 700
+      - 300
+    parameters:
+      command: >-
+        nmap -sn {{ $json.target }} -oX /data/results/host-discovery-{{ $execution.id }}.xml
+      options:
+        shell: true
+  - id: parse-results
+    name: Parse XML Results
+    type: n8n-nodes-base.function
+    typeVersion: 1
+    position:
+      - 900
+      - 300
+    parameters:
+      functionCode: |
+        const fs = require('fs');
+        const xml2js = require('xml2js');
+        
+        const parser = new xml2js.Parser();
+        const xmlData = fs.readFileSync('/data/results/host-discovery-' + items[0].json.executionId + '.xml', 'utf8');
+        
+        parser.parseString(xmlData, (err, result) => {
+          if (err) throw err;
+          
+          const hosts = result.nmaprun.host || [];
+          return hosts.map(host => ({
+            json: {
+              status: host.status?.[0]?.$.state || 'unknown',
+              ip: host.address?.[0]?.$.addr || 'unknown',
+              hostname: host.hostnames?.[0]?.hostname?.[0]?.$.name || '',
+              mac: host.address?.[1]?.$.addr || '',
+            }
+          }));
+        });
+  - id: update-targets
+    name: Update Targets
+    type: n8n-nodes-base.httpRequest
+    typeVersion: 1
+    position:
+      - 1100
+      - 300
+    parameters:
+      method: put
+      url: >-
+        http://backend:8000/api/v1/targets/{{ $json.id }}
+      sendHeaders: true
+      headerParameters:
+        parameters:
+          - name: Authorization
+            value: Bearer {{ $env.API_TOKEN }}
+      sendBody: true
+      bodyParameters:
+        parameters:
+          - name: json
+            value: >-
+              {"status": "discovered", "is_alive": true}
+      options: {}
+  - id: webhook-response
+    name: Webhook Response
+    type: n8n-nodes-base.webhook
+    typeVersion: 1
+    position:
+      - 1300
+      - 300
+    parameters:
+      respondWith: json
+      jsonResponse: >-
+        {"status": "completed", "hosts_found": {{ $json.length }}, "execution_id": {{ $execution.id }} }
+      options: {}
+connections:
+  Webhook:
+    main:
+      - - node: Extract Targets
+          type: main
+          index: 0
+  Extract Targets:
+    main:
+      - - node: Nmap Ping Sweep
+          type: main
+          index: 0
+  Nmap Ping Sweep:
+    main:
+      - - node: Parse XML Results
+          type: main
+          index: 0
+  Parse XML Results:
+    main:
+      - - node: Update Targets
+          type: main
+          index: 0
+  Update Targets:
+    main:
+      - - node: Webhook Response
+          type: main
+          index: 0

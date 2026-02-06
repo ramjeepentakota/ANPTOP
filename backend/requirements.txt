@@ -1,0 +1,202 @@
+# ANPTOP Backend Dependencies - Complete Security Tools Edition
+# ==============================================================================
+
+# FastAPI Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Database
+sqlalchemy[asyncio]==2.0.25
+alembic==1.13.1
+psycopg2-binary==2.9.9
+asyncpg==0.29.0
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+pyotp==2.9.0
+qrcode==7.4.2
+
+# Redis
+redis==5.0.1
+aioredis==2.0.1
+
+# Configuration
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# HTTP Client
+httpx==0.26.0
+aiohttp==3.9.1
+
+# n8n Integration
+n8n-api-client==0.1.0
+
+# Evidence Storage
+boto3==1.34.14
+aiobotocore==2.7.0
+minio==7.2.0
+
+# Utilities
+python-dateutil==2.8.2
+slugify==2.0.1
+uuid==1.30
+aiofiles==23.2.1
+loguru==0.7.2
+
+# ==============================================================================
+# SECURITY TOOLS - Web Scanning & API Testing
+# ==============================================================================
+OWASP-ZAP==0.0.21
+zaproxy==0.3.1
+pyjwt[crypto]==2.8.0
+requests==2.31.0
+httpx==0.26.0
+httpie==3.3.0
+
+# ==============================================================================
+# SECURITY TOOLS - Cloud Security
+# ==============================================================================
+boto3==1.33.0
+botocore==1.33.0
+azure-identity==1.15.0
+azure-mgmt-resource==23.1.1
+azure-mgmt-security==5.0.0
+google-cloud==0.34.0
+google-cloud-storage==2.14.0
+google-cloud-secret-manager==2.18.0
+google-cloud-logging==3.10.0
+
+# Cloud Security Scanners
+scoutsuite==5.13.1
+prowler==3.3.1
+cloud-custodian==0.9.14.0
+checkov==3.1.55
+terrascan==1.18.0
+trivy==0.48.1
+grype==0.74.0
+clair==0.8.0
+
+# ==============================================================================
+# SECURITY TOOLS - Kubernetes
+# ==============================================================================
+kube-hunter==0.6.8
+kube-bench==0.6.2
+kubernetes==29.0.0
+helm-parser==0.1.0
+
+# ==============================================================================
+# SECURITY TOOLS - Exploitation & Post-Exploitation
+# ==============================================================================
+pymetasploit3==1.0.3
+impacket==0.10.0
+scrapli==2024.1.30
+netmiko==4.3.0
+pacu==1.0.0
+
+# Credential Harvesting
+lazagne==0.1
+keecutter==1.0.0
+
+# ==============================================================================
+# SECURITY TOOLS - Git Secrets & Code Scanning
+# ==============================================================================
+gitleaks==8.18.0
+trufflehog==3.63.0
+bandit==1.7.6
+safety==2.3.5
+
+# ==============================================================================
+# SECURITY TOOLS - WordPress & CMS
+# ==============================================================================
+wpscan==3.8.32
+cmsmap==0.5.0
+
+# ==============================================================================
+# SECURITY TOOLS - Subdomain Enumeration
+# ==============================================================================
+amass==3.23.0
+sublist3r==1.0.0
+
+# ==============================================================================
+# SECURITY TOOLS - Blockchain
+# ==============================================================================
+web3==6.11.0
+web3[全套]==6.11.0
+mythril==0.23.25
+slither-analyzer==0.10.1
+echidna==2.2.7
+manticore==0.4.2
+py-evm==0.7.0
+
+# ==============================================================================
+# SECURITY TOOLS - Payment Systems
+# ==============================================================================
+stripe==7.8.0
+paypalrestsdk==1.13.3
+braintree==4.28.0
+square==35.0.0
+
+# ==============================================================================
+# SECURITY TOOLS - JWT & API Fuzzing
+# ==============================================================================
+pyjwt==2.8.0
+pyjwt[crypto]==2.8.0
+wfuzz==3.1.0
+boofuzz==0.4.1
+
+# ==============================================================================
+# REPORTING
+# ==============================================================================
+jinja2==3.1.3
+weasyprint==60.2
+markdown==3.5.1
+pdfkit==1.0.0
+reportlab==4.0.7
+
+# ==============================================================================
+# LOGGING & MONITORING
+# ==============================================================================
+structlog==24.1.0
+python-json-logger==2.0.7
+prometheus-client==0.19.0
+
+# ==============================================================================
+# TESTING
+# ==============================================================================
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+httpx==0.26.0
+respx==0.21.1
+
+# ==============================================================================
+# DEVELOPMENT
+# ==============================================================================
+black==24.1.1
+isort==5.13.2
+mypy==1.8.0
+flake8==7.0.0
+pre-commit==3.6.0
+
+# ==============================================================================
+# OPTIONAL DEPENDENCIES
+# ==============================================================================
+# Email notifications
+emails==0.6
+aiosmtplib==3.0.1
+
+# Rate limiting
+slowapi==0.1.8
+
+# Rate limiting with Redis
+limits==3.6.0
+
+# CORS
+fastapi-cors==0.0.1
+
+# GraphQL
+strawberry-graphql[fastapi]==0.215.0
